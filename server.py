@@ -2,9 +2,19 @@ import json,time,secrets,threading,random
 from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
 from pathlib import Path
 rooms={}; lock=threading.RLock()
+def finish_turn(r,hit,now):
+ i=r['turn'];r['hits'][i]=hit
+ if i==r['first']:
+  r['turn']=1-i;r['deadline']=now+60;return
+ if all(r['hits']):
+  r.update(phase='rps',choices=[None,None],rps_round=1,rps_last=None,deadline=0)
+ elif any(r['hits']):
+  r.update(phase='end',winner=r['hits'].index(True),deadline=0)
+ else:
+  r.update(turn=r['first'],hits=[False,False],deadline=now+60)
 def tick(r):
  while r['phase']=='play' and time.time()>=r['deadline']:
-  r['history'].append([r['turn'],None,None]);r['turn']=1-r['turn'];r['deadline']+=60
+  r['history'].append([r['turn'],None,None]);finish_turn(r,False,r['deadline'])
 class H(BaseHTTPRequestHandler):
  def send(self,x,status=200):
   b=json.dumps(x,ensure_ascii=False).encode();self.send_response(status);self.send_header('Content-Type','application/json; charset=utf-8');self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(b)
@@ -31,18 +41,23 @@ class H(BaseHTTPRequestHandler):
      if len(r['players'])==2 and all(q['size']==n for q in r['players']):r['phase']='secret'
     elif a=='secret':
      assert r['phase']=='secret' and p['secret'] is None,'不能修改谜底';v=str(d['value']);assert len(v)==p['size'] and v.isascii() and v.isdigit(),'数字格式错误';p['secret']=v
-     if all(q['secret'] is not None for q in r['players']):r['phase']='play';r['turn']=random.randrange(2);r['deadline']=time.time()+60
+     if all(q['secret'] is not None for q in r['players']):r['phase']='play';r['turn']=random.randrange(2);r['first']=r['turn'];r['hits']=[False,False];r['deadline']=time.time()+60
     elif a=='guess':
      assert r['phase']=='play' and r['turn']==i,'当前不是你的回合';v=str(d['value']);assert len(v)==p['size'] and v.isascii() and v.isdigit(),'数字格式错误';c=sum(x==y for x,y in zip(v,r['players'][1-i]['secret']));r['history'].append([i,v,c])
-     if c==p['size']:r['phase']='end';r['winner']=i
-     else:r['turn']=1-i;r['deadline']=time.time()+60
+     finish_turn(r,c==p['size'],time.time())
+    elif a=='rps':
+     assert r['phase']=='rps' and r['choices'][i] is None,'已出拳或阶段结束';v=d['value'];assert v in ('rock','paper','scissors'),'无效出拳';r['choices'][i]=v
+     if all(r['choices']):
+      x,y=r['choices'];r['rps_last']=r['choices'][:]
+      if x==y:r['choices']=[None,None];r['rps_round']+=1
+      else:r.update(phase='end',winner=0 if (x,y) in [('rock','scissors'),('scissors','paper'),('paper','rock')] else 1)
     elif a=='again':
      assert r['phase']=='end','游戏尚未结束';p['again']=True
      if all(q['again'] for q in r['players']):
       for q in r['players']:q.update(size=None,secret=None,again=False)
-      r.update(phase='size',history=[],winner=None,deadline=0)
+      r.update(phase='size',history=[],winner=None,deadline=0,choices=[None,None],rps_last=None,rps_round=0,hits=[False,False])
     elif a!='state':raise ValueError('未知操作')
-    self.send({'phase':r['phase'],'players':[{k:v for k,v in q.items() if k!='token' and (k!='secret' or j==i or r['phase']=='end')}|{'ready':q['secret'] is not None} for j,q in enumerate(r['players'])],'me':i,'history':r['history'],'turn':r['turn'],'remaining':max(0,r['deadline']-time.time()),'winner':r['winner']})
+    self.send({'phase':r['phase'],'players':[{k:v for k,v in q.items() if k!='token' and (k!='secret' or j==i or r['phase']=='end')}|{'ready':q['secret'] is not None} for j,q in enumerate(r['players'])],'me':i,'history':r['history'],'turn':r['turn'],'remaining':max(0,r['deadline']-time.time()),'winner':r['winner'],'rps_round':r.get('rps_round',0),'rps_last':r.get('rps_last') if r['phase'] in ('rps','end') else None,'rps_ready':r.get('choices',[None,None])[i] is not None,'pending_hit':r['phase']=='play' and any(r.get('hits',[]))})
   except Exception as e:self.send({'error':str(e) or '操作失败'},400)
 if __name__=='__main__':
  import os
